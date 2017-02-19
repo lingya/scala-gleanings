@@ -16,11 +16,24 @@ description: -
 
 [TOC]
 
-[翻译至：Asynchronous Programming and Scala](https://alexn.org/blog/2017/01/30/asynchronous-programming-scala.html)
+- [1. 介绍](async-concurrent/异步编程与Scala.md#1-介绍)
+- [2. 巨大的错觉](async-concurrent/异步编程与Scala.md#2-巨大的错觉)
+- [3. 回调地狱]()
+  - [3.1. 顺序化]()
+  - [3.2. 并行化]()
+  - [3.3. 递归]()
+- [4. Future * Promise]()
+  - [4.1. 顺序化]()
+  - [4.2. 并行化]()
+  - [4.3. 递归]()
+  - [4.4. 性能代价]()
+- [5. Task，Scala 的 IO Monad]()
+
+[翻译自：Asynchronous Programming and Scala](https://alexn.org/blog/2017/01/30/asynchronous-programming-scala.html)
 
 现在随处可见异步性的身影，同时它也被包括在并发性之内。这篇文章解释了什么是异步处理和它面临的挑战。
 
-## 介绍
+## 1. 介绍
 
 它作为一个比*多线程*更加综合的概念，但是人们往往将二者混淆。如果需要一种关系来表示，可以是这样：
 
@@ -61,7 +74,7 @@ type Async[A] = (Try[A] => Unit) => Unit
 
 这些抽象有什么共同点呢？他们都提供了处理异步化的方式，其中一些更为优秀。
 
-## 巨大的错觉
+## 2. 巨大的错觉
 
 我们喜欢假装能将函数的异步结果转换为同步：
 
@@ -102,7 +115,7 @@ def await[A](fa: Async[A]): A
 >
 > 真正的学习所有可行方案或做出选择是很痛苦的，但总比做出无知的选择要痛苦的少，TOOWTDI(?) 和 “worse is better”在这种情况下害处则会更大。人们在解释难于学习一门新的或更有表现力的语言时，比如 Scala 或 Haskell，往往没有提到点上，因为如果他们不得不处理并发问题，这是学习一种新的编程语言将会使他们最小的问题。我了解到一些人因为并发问题而离开了软件行业。
 
-## 回调地狱
+## 3. 回调地狱
 
 让我们创建一个仿造的例子来阐明我们的疑问。比如开启两个异步处理并将他们的结果结合在一起。
 
@@ -129,7 +142,7 @@ timesTwo(20) { result => println(s"Result: $result")}
 // => Result: 40
 ```
 
-### 顺序化(副作用炼狱)
+### 3.1. 顺序化(副作用炼狱)
 
 让我们来结合两个异步结果，以平滑的顺序让一个在另一个发生之后执行：
 
@@ -162,7 +175,7 @@ def timesFour(n:Int):Int
 
 但是等等，事情还会变得更糟。
 
-### 并行化(梦境中的不确定性)
+### 3.2. 并行化(梦境中的不确定性)
 
 第二个调用并不基于第一个调用，因此他们可以并行运行。在 JVM 我们可以并行运行 CPU-bound 的任务，但这并不适用于 Javascript，我们可以发起 Ajax 请求或于其他网页工作(web worker)者交谈。
 
@@ -313,7 +326,7 @@ def timeFourInParallel(n:Int):Async[Int] = {
 
 > **PRO-TIP**：如果你想编写  Javascript / Scala.js 的交叉编译代码，基于性能调整和用于操作原子引用的酷炫工具类，可以尝试[Monix](https://monix.io/)中的[Atomic](https://monix.io/docs/2x/execution/atomic.html)。
 
-### 递归(爆栈的愤怒)
+### 3.3. 递归(爆栈的愤怒)
 
 如果我告诉你上面的`onFinish`调用并非栈安全(stack-unsafe)的，同时当你调用它时也不会强制*异步边界(asynchronous boundary)*，这时你的程序会因为一个`StackOverflowError`爆炸，又该怎么办呢？
 
@@ -420,7 +433,7 @@ java.lang.StackOverflowError
 
 Are you feeling the fire yet? 🔥
 
-## Futures & Promises
+## 4. Future * Promise
 
 `scala.concurrent.Future`描述了完整的异步求值计算，和我们上面用的`Async`有点类似。
 
@@ -464,7 +477,7 @@ trait Future[+T] {
 
 如果你不理解为什么这些签名都需要一个`ExecutionContext`，回到上面的“递归”部分，直到你完全理解了。
 
-### 顺序化
+### 4.1. 顺序化
 
 让我们使用`Future`重新定义“回调地狱”部分的函数：
 
@@ -547,7 +560,7 @@ def sum(list:List[Future[Int]])(implicit ec:ExecutionContext):Future[Int] = {
 
 还记得我前面的碎碎念中提到的*没有银弹*？
 
-### 并行化
+### 4.2. 并行化
 
 像先前的例子中展示的，这两个函数互相独立，因此我们可以并行调用他们。使用`Future`则会更加简单，尽管求值语义对于新手来说会有点迷惑：
 
@@ -577,7 +590,7 @@ def timesFourInParallel(n:Int)(implicit ec:ExecutionContext):Future[Int] =
 
 这种用法估计也会让新手吃惊，因为这些`Future`仅会当传入`sequence`的集合是精确的时候才会以并行的方式执行，不像 Scala 的`Stream`或`Iterator`。显然这个名字是个误称。
 
-### 递归
+### 4.3. 递归
 
 `Future`类型对于递归操作是绝对安全的，因为信心在于执行回调的`ExecutionContext`。因此重试前面的例子：
 
@@ -609,7 +622,7 @@ val list = 0.until(10000).map(timesTwo).toList
 sequence(list).foreach(r => println(s"Sum: ${r.sum}""))
 ```
 
-### 性能代价
+### 4.4. 性能代价
 
 `Future`的麻烦是每次调用`onComplete`都会使用一个`ExecutionContext`来执行，通常这意味着一个`Runnable`被发送到了线程池，像这样分支(fork)一个*逻辑线程*。如果你拥有 CPU 绑定的任务，这种实现细节对性能来说是一种灾难，因为跳跃的线程意味着 [context switches](https://en.wikipedia.org/wiki/Context_switch)，同时会带来 CPU 的[cache locality](https://en.wikipedia.org/wiki/Locality_of_reference)被摧毁。当然，该实现拥有确定性的优化，比如`flatMap`的实现中使用一个内部的蹦床形式的(trampolined?)执行上线文，为了避免在链接这些内部回调时进行分支，但是这还不够并且基准测试也不会说谎。
 
@@ -639,6 +652,6 @@ sequence(list).foreach(r => println(s"Sum: ${r.sum}""))
 
 > 注意：这些基准测试是有局限的，仍然有一些用例中`Future`会更快(eg. Monix [Observer](https://monix.io/docs/2x/reactive/observers.html)使用`Future`用做背压)并且性能通常并不相关，比如执行 I/O，即那些吞吐并非 CPU 绑定的场景。
 
-## Task，Scala 的 IO Monad
+## 5. Task，Scala 的 IO Monad
 
 …...
