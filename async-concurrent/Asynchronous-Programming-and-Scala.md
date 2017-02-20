@@ -637,4 +637,145 @@ sequence(list).foreach(r => println(s"Sum: ${r.sum}""))
 
 ## 5. Task，Scala 的 IO Monad
 
-…...
+`Task`是一种用于控制可惰性、可异步计算的数据类型，可用于控制副作用、避免非确定性和回调地狱。
+
+[Monix](https://monix.io/) 库从 [Task in Scalaz](https://github.com/scalaz/scalaz/blob/scalaz-seven/concurrent/src/main/scala/scalaz/concurrent/Task.scala) 获得灵感，提供了一种非常精致的 [Task](https://monix.io/docs/2x/eval/task.html) 实现。相同的概念，但实现不同。
+
+> `Task`类型同样汲取了来自 [Haskell's IO monad](https://wiki.haskell.org/IO_inside) 的灵感，而作者认为这是真正的 Scala `IO` 类型。
+>
+> 该问题存在争论，因为 Scalaz 同样暴漏了一个仅用于处理异步计算的`IO`类型。Scalaz 的 `IO`并非异步，这表示它的描述并不完整，因为在 JVM 之上你必须以某种方式表示异步计算。另一方面，在 Haskell 中的你拥有转换成`IO`类型的`Async`类型，或许这是由运行时管理的(green-threads and all)。
+>
+> 在 JVM 之上的 Scalaz 实现中，我们无法使用`IO`在求值过程中以不阻塞线程的方式来表达异步计算，这是要避免的，因为[阻塞线程则意味着倾向于错误](https://monix.io/docs/2x/best-practices/blocking.html)。
+
+总的来说，`Task`类型：
+
+- 建模惰性、异步求值
+- 建模一个生产者向一个或多个消费者仅发送一个值
+- 它是惰性求值，因此对比`Future`它并不会触发执行，或在`runAsync`之前都不会有任何效果
+- 不会被求值记忆化(memoized)，但是 Monix 的`Task`可以
+- 无需再另一个逻辑线程执行
+
+而 Monix 中的实现拥有更多特别之处：
+
+- 允许取消一个运行中的计算
+- 在其实现中永远不会阻塞任何线程
+- 没有暴露任何可以阻塞线程的 API 调用
+- 所有异步操作都是栈安全的(stack safe)
+
+`Task`在设计上的可视化表示：
+
+|                  | Eager               | Lazy                                     |
+| ---------------- | ------------------- | ---------------------------------------- |
+| **Synchronous**  | A                   | () => A                                  |
+|                  |                     | [Coeval[A]](https://monix.io/docs/2x/eval/coeval.html), [IO[A]](https://github.com/scalaz/scalaz/blob/scalaz-seven/effect/src/main/scala/scalaz/effect/IO.scala) |
+| **Asynchronous** | (A => Unit) => Unit | (A => Unit) => Unit                      |
+|                  | Future[A]           | [Task[A]](https://monix.io/docs/2x/eval/task.html) |
+
+### 5.1. 顺序化
+
+使用`Task`重新定义第三节中的函数：
+
+```scala
+import monix.eval.Task
+
+def timesTwo(n:Int):Task[Int] = Task(n * 2)
+
+// Usage
+{
+  // Our ExecutionContext needed on evaluation
+  import scala.concurrent.Scheduler.Implicits.global
+  
+  timesTwo(20).foreach{ result => println(s"Result: $result")}
+  // => Result: 40
+}
+```
+
+代码看起来和第四节中`Future`的版本一样，唯一的区别是新的`timesTwo`函数不再接受`ExecutionContext`作为参数。这是因为`Task`引用是惰性的，和函数类似，因此在调用强制求值发生的`foreach`之前什么都不会打印。我们需要的是一个 [Scheduler](https://monix.io/docs/2x/execution/scheduler.html)，这是 Monix 中增强的`ExecutionContext`。
+
+现在实现 3.1 节中的顺序化：
+
+```scala
+def timesFour(n:Int):Task[Int] = {
+  for{
+    a <- timesTwo(n)
+    b <- timesTwo(n)
+  } yield a + b
+}
+
+// Usage
+{
+  import scala.concurrent.Scheduler.Implicits.global
+  
+  timesFour(20).foreach{ result => println(s"Result: $result")}
+  // => Result: 80
+}
+```
+
+同样是和`Future`类型一样，*for 表达式*魔法仍然是被 Scala 编译器转换成`flatMap`和`map`调用，字面值等同于：
+
+```scala
+def timesFour(n:Int):Task[Int] = {
+  timesTwo(n).flatMap{ a=>
+    timesTwo(n).map{ b=>
+      a + b
+    }
+  }
+}
+```
+
+### 5.2. 并行化
+
+`Task`的并行化比`Future`要好的多，因为`Task`在分支 task 时支持细粒度控制，当在当前线程和调用栈执行转换(eg. map/flatMap)时，局域性的缓存保留和避免上下文切换则等同于顺序执行。
+
+但是首先，转换成`Future`的形式并不能正常工作：
+
+```scala
+// BAD SAMPLE, 为了达成并行，这实质上会是顺序化
+def timesFour(n:Int):Task[Int] = {
+  // 并不会触发执行，因为 Task 是惰性的
+  val fa = timesTwo(n)
+  val fb = timesTwo(n)
+  // 因为惰性的缘故求值会是顺序化
+  for{
+    a <- fa
+    b <- fb
+  } yield a + b
+}
+```
+
+想要达到并行化，必须显示指定：
+
+```scala
+def timesFour(n:Int):Task[Int] = 
+  Task.mapBoth(timesTwo(n), timesTwo(n))(_ + _)
+```
+
+是不是`mapBoth`看起来很熟悉？如果这两个任务在执行时分支线程，`mapBoth`会同时启动两者，从而达到并行化。
+
+### 5.3. 递归
+
+`Task`支持递归，栈安全且十分有效，这是基于其内部的 trampoline。你可以查看这篇 Rúnar Bjarnason 的论文 [Stackless Scala with Free Monads](http://blog.higher-order.com/assets/trampolines.pdf) 来了解其为何如此有效。
+
+其`sequence`实现与`Future`非常相似，只不过你会在`sequence`的签名中发现其惰性化：
+
+```scala
+def sequence[A](list:List[Task[A]]): Task[List[A]] = {
+  val seed = Task.now(List.empty[A])
+  list.foldLeft(seed)((acc, f) => for{
+    l <- acc
+    a <- f
+  } yield a :: l).map(_.reverse)
+}
+
+// Invocation
+{
+  import monix.execution.Scheduler.Implicits.global
+  
+  sequence(List(timesTwo(10), timesTwo(20), timesTwo(30))).foreach(println)
+  // => List(20, 40, 60)
+}
+```
+
+## 6. 函数式编程和 Type-class
+
+...
