@@ -416,7 +416,7 @@ java.lang.StackOverflowError
 
 Are you feeling the fire yet? 🔥
 
-## 4. Future * Promise
+## 4. Future & Promise
 
 `scala.concurrent.Future`描述了完整的异步求值计算，和我们上面用的`Async`有点类似。
 
@@ -778,4 +778,202 @@ def sequence[A](list:List[Task[A]]): Task[List[A]] = {
 
 ## 6. 函数式编程和 Type-class
 
-...
+当你使用这些众所周知的函数时，比如：`map`，`flatMap`和`mapBoth`，我们不再关心这一切的背后是一个`(A => Unit) => Unit`，因为这些函数会假设为合法、纯净、透明的。这意味着我们可以脱离其上下文来推导它们的结果。
+
+这是 Haskell 中`IO`的伟大成就。Haskell 不会“伪造(fake)”副作用，因为返回`IO`函数字面意义上是纯的，副作用会被推迟到其所属程序的边缘。我们可以同样看待`Task`。不过，对于`Future`急切的本性(立即计算)来说会更加复杂，但是使用`Future`也不是一个坏的选择。
+
+那么我们能够基于这些类型，比如`Task`、`Future`、`Coeval`、`Eval`、`IO`、`Id`、`Observable`或者一些其他的类型，来创建接口或抽象吗？
+
+当然我们可以，我们已经见过使用`flatMap`来描述顺序化，使用`mapBoth`来描述并行化。但是我们不能使用经典的 OOP 来描述他们，其中一个原因是`Functional`参数的协变和逆变规则，这会导致我们在`flatMap`中失去类型信息(除非你使用 F-bounded 泛型类型，这样更适合实现复用或其他 OOP 语言不可用时)，同时我们要描述一个数据构造器，他不能是一个方法(比如 OOP 的子类应用到实例而不是整个类)。
+
+幸运的是，Scala 是极少数支持高阶类型且能够编码类型类(type-class)的语言，这意味着我们拥有了从 Haskell 端口概念所需要的一切。
+
+> 作者的碎碎念：`Monad`，`Applicative`，`Functor`，这些可怕的单词让那些并不忠实的人心生畏惧，导致他们认为关注的是一些与现实世界脱轨的“学术”概念，书籍作者要避免大量使用这些单词，包括 Scala 的 API 文档及官方教程。
+>
+> 但这是给 Scala 和其用户帮倒忙。其他语言中仅有的设计模式主要是难于解释，因为这些不能用类型来表示。你可以用一只手输出拥有这种表达能力的语言。而用户痛苦的是当他们遇到麻烦时不知如何从现有的文献中搜索相关主题，缺失对正确术语的学习。
+>
+> 我也觉得这是一味地反智主义([anti-intellectualism](https://en.wikipedia.org/wiki/Anti-intellectualism))，向往常一样对无知的恐惧。你可以发现这些都来自真正做他们的人，但我们无一幸免。比如 Java 中的`Optional`类型违反了 Functor 的规则(e.g. `opt.map(f).map(g) != opt.map(f andThen g)`)，Swift 中愚蠢的 `5 == Some(5)`，可以幸运的向人们解释`Some(null)`实际上与`null`的意义相同，是`AnyRef`的有效值，因为不然的话你不能定义一个`Applicative[Option]`。
+
+### 6.1.  Monad(顺序化和递归)
+
+本文并不会解释 Monad。另外有一篇文章来专门解释它。但如果你想建立一个直觉，这里有另外一个：在数据类型的上下文中，比如`Future`或`Task`，Monads 用于描述操作的顺序，并且是保证顺序的唯一有效方法。
+
+> "*Observation: programmers doing concurrency with imperative languages are tripped by the unchallenged belief that ";" defines sequencing.*" – [Aleksey Shipilëv](https://twitter.com/shipilev/status/822004316605206529)
+
+Scala 中一个简单的编码`Monad`的例子：
+
+```scala
+// we shouldn't need to do this
+import scala.language.higherKinds
+
+trait Monad[F[_]]{
+  /** Constructor (said to lift a value `A` in the `F[A]`
+    * monadic context). Also part of `Applicative`, see below.
+    */
+  def pure[A](a: A): F[A]
+
+  /** FTW */
+  def flatMap[A,B](fa: F[A])(f: A => F[B]): F[B]
+}
+```
+
+同时提供一个`Future`实现：
+
+```scala
+import scala.concurrent._
+
+// Supplying an instance for Future isn't clean, ExecutionContext needed
+class FutureMonad(implicit ec: ExecutionContext)
+  extends Monad[Future] {
+
+  def pure[A](a: A): Future[A] =
+    Future.successful(a)
+
+  def flatMap[A,B](fa: Future[A])(f: A => Future[B]): Future[B] =
+    fa.flatMap(f)
+}
+
+object FutureMonad {
+  implicit def instance(implicit ec: ExecutionContext): FutureMonad =
+    new FutureMonad
+}
+```
+
+这真是一个强力的东西。现在我们可以描述一个用于`Task`、`Future`、`IO`的泛型函数，无论如何，如果`flatMap`是栈安全的话这将非常伟大：
+
+```scala
+/** Calculates the N-th number in a Fibonacci series. */
+def fib[F[_]](n: Int)(implicit F: Monad[F]): F[BigInt] = {
+  def loop(n: Int, a: BigInt, b: BigInt): F[BigInt] =
+    F.flatMap(F.pure(n)) { n =>
+      if (n <= 1) F.pure(b)
+      else loop(n - 1, b, a + b)
+    }
+
+  loop(n, BigInt(0), BigInt(1))
+}
+
+// Usage:
+{
+  // Needed in scope
+  import FutureMonad.instance
+  import scala.concurrent.ExecutionContext.Implicits.global
+
+  // Invocation
+  fib[Future](40).foreach(r => println(s"Result: $r"))
+  //=> Result: 102334155
+}
+```
+
+> 注意：这只是一个玩具样例，严肃的实现参考 [Typelevel's Cats](http://typelevel.org/cats/)。
+
+### 6.2. Applicative(并行化)
+
+Monad 定义了操作的顺序化，但是有时我们想组合那些互不依赖的计算的结果，他们可以同时求值，或者并行化。还有一个例子可以证明 Applicative 比 Monad 更加可组合。
+
+现在扩展我们的*Typeclassopedia*:
+
+```scala
+trait Functor[F[_]] {
+  /** I hope we are all familiar with this one. */
+  def map[A,B](fa: F[A])(f: A => B): F[B]
+}
+
+trait Applicative[F[_]] extends Functor[F] {
+  /** Constructor (lifts a value `A` in the `F[A]` applicative context). */
+  def pure[A](a: A): F[A]
+
+  /** Maps over two references at the same time.
+    *
+    * In other implementations the applicative operation is `ap`,
+    * but `map2` is easier to understand.
+    */
+  def map2[A,B,R](fa: F[A], fb: F[B])(f: (A,B) => R): F[R]
+}
+
+trait Monad[F[_]] extends Applicative[F] {
+  def flatMap[A,B](fa: F[A])(f: A => F[B]): F[B]
+}
+```
+
+然后扩展我们的`Future`实现：
+
+```scala
+// Supplying an instance for Future isn't clean, ExecutionContext needed
+class FutureMonad(implicit ec: ExecutionContext)
+  extends Monad[Future] {
+
+  def pure[A](a: A): Future[A] =
+    Future.successful(a)
+
+  def flatMap[A,B](fa: Future[A])(f: A => Future[B]): Future[B] =
+    fa.flatMap(f)
+
+  def map2[A,B,R](fa: Future[A], fb: Future[B])(f: (A,B) => R): Future[R] =
+    // For Future there's no point in supplying an implementation that's
+    // not based on flatMap, but that's not the case for Task ;-)
+    for (a <- fa; b <- fb) yield f(a,b)
+}
+
+object FutureMonad {
+  implicit def instance(implicit ec: ExecutionContext): FutureMonad =
+    new FutureMonad
+}
+```
+
+现在可以基于`Applicative`定义泛型函数并用于`Future`：
+
+```scala
+def sequence[F[_], A](list: List[F[A]])
+  (implicit F: Applicative[F]): F[List[A]] = {
+
+  val seed = F.pure(List.empty[A])
+  val r = list.foldLeft(seed)((acc,e) => F.map2(acc,e)((l,a) => a :: l))
+  F.map(r)(_.reverse)
+}
+```
+
+> 注意：同样是一个玩具样例，参考[Typelevel's Cats](http://typelevel.org/cats/)。
+
+### 6.3. 为异步求值定义类型类？
+
+上面的部分缺少的是真正触发计算并获得结果值。思考 Scala 的`Future`，我们想要一种方式来抽象`onComplete`。想象 Monix 中我们想要抽象`runAsync`。想象 Haskell 和 Scalaz 的`IO`，我们想要抽象`unsafePerformIO`。
+
+[FS2](https://github.com/functional-streams-for-scala/fs2/) 库中定义了一个名为 [Effect](https://github.com/functional-streams-for-scala/fs2/blob/series/1.0/core/shared/src/main/scala/fs2/util/Effect.scala) 类型类来这样做：
+
+```scala
+trait Effect[F[_]] extends Monad[F] {
+  def unsafeRunAsync[A](fa: F[A])(cb: Try[A] => Unit): Unit
+}
+```
+
+这看起来向我们初始的`Async`类型，跟`Future.onComplete`、`Task.runAsync`、`IO.unsafePerformIO`很相似。
+
+然而，它并非真正的类型类：
+
+- 它是非法的，然而也不足以取消他的资格(after all, useful lawless type-classes like `Show` exist)，但最大的问题是....
+- 如 3.3 中所示，为了避免`StackOverflowError`，我们需要某种执行上下文或线程池来执行异步任务且不会导致栈溢出。
+
+但是这样的执行上下文根据实现不同而不同。Java 使用 Executor，Scala 的`Future`时候使用`ExecutionContext`，Monix 使用增强自`ExecutionContext`的`Scheduler`。FS2 和 Scalaz 使用 包装自`Executor`的`Strategy`来 fork 线程，但是调用`unsafePerformIO`或`runAsync`时并不会注入上下文(这也是为什么很多 Scalaz 组合子实际上并不安全)。
+
+我们可以采取与`Future`同样的策略，从作用域中获取一个`implicit whatever: Context`来创建实例。但这有点尴尬且效率低下。这也意味这不使用上下文的情况下我们仅仅不能为`Effect.unsafePerformIO`定义`flatMap`。如果我们不能这样做，这时也不会继承自`Monad`，因为它没有必要是一个`Monad`。
+
+
+因此为个人也不是很确定 - 如果你对 Cats 有什么好的建议，我愿洗耳恭听。
+
+我希望你喜欢这个思想试验，设计东西是很有趣的。
+
+## 7. 选择正确的工具
+
+一些抽象较其他会更为通用，为个人认为"为工作选择正确的工具"这样的口头禅是过度保护可怜人的选择。
+
+为此，Rúnar Bjarnason 有一个非常有意思的表述，名为 [Constraints Liberate, ](https://www.youtube.com/watch?v=GqmsQeSzMdw)，而 [Liberties Constrain](https://www.youtube.com/watch?v=GqmsQeSzMdw) 最终真正道出了并发抽象的本质。
+
+如前所述，并没有银弹能够通用的解决并发问题。抽象的层次越高，能解决的问题视野也就越少。但是更少的视野和其强大的能力，模型也会更加简单更加可组合。比如 Scala 社区中很多开发者滥用 Akka Actor，这个库在不被误用时是很伟大的。就像能够使用`Future`或`Task`时不用 Actor。同样在其他的抽象中，比如 Monix 或 ReactiveX 中的`Observable`抽象。
+
+同样用心学习下面两条规则：
+
+- 避免使用回调、线程和锁，它们易错且不可组合；
+- 避免像瘟疫一样并发(avoid concurrency like the plague it is)
+
+最后让我告诉你，并发专家首先是避免并发的专家....
