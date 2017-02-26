@@ -7,6 +7,8 @@
 
 - 语言基础
 - 函数式编程
+  - [Monoid](functional/monoid.md)
+  - [函数式编程与类型类](functional/functional-programming-and-type-classes.md)
 - 并发
   - [异步编程与 Scala](async-concurrent/Asynchronous-Programming-and-Scala.md)
 - Akka Actors
