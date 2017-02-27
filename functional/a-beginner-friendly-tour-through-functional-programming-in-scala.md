@@ -440,6 +440,201 @@ final case class Map[A0, A](v: ConsoleIO[A0], f: A0 => A) extends ConsoleIO[A]
 def userNameLenProgram:ConsoleIO[Int] = userNameProgram.map(_.length)
 ```
 
-随着`map`的加入，
+随着`map`的加入，`EndWith`的作用发生了改变：我们不再需要它从程序中返回一个值，因为我们可以把拥有的任何值转换为返回值。比如你有一个`ConsoleIO[String]`，我们可以通过一个`String => Int`函数转换为`Console[Int]`。
 
-未完成....
+然后，`EndWith`仍然可以用于构造一个不执行任何副作用的“纯“程序(但能够与其他程序组合)。因此它仍然是有用的，虽然与其最初的目的不同。因此，我们可以将其重新命名为`Pure`：
+
+```scala
+sealed trait ConsoleIO[A] {
+  def map[B](f: A => B): ConsoleIO[B] = Map(this, f)
+}
+
+final case class WriteLine[A](line:String, then:ConsoleIO[A]) extends ConsoleIO[A]
+final case class ReadLine[A](process: String => ConsoleIO[A]) extends ConsoleIO[A]
+final case class Pure[A](value: A) extends ConsoleIO[A]
+final case class Map[A0, A](v: ConsoleIO[A0], f: A0 => A) extends ConsoleIO[A]
+```
+
+通过这些封装，我们可以没有任何限制和约束的构建并复用这个控制台 IO 程序。所有这些描述都是拥有确定性、完整性的纯函数，因此也获得了函数式代码的强大优势：易于理解、易于测试、易于安全的调整，且易于组合。
+
+最终 ，我们需要把一个程序的描述转换为实际的程序-一个能真正执行副作用的程序(这意味这没有确定性、也不纯)。通常这个程序会叫做*interpretation*。
+
+可以写一个简单的，如果没有确定性、也不纯洁，解释器可以基于`ConsoleIO[A]`使用一下类似的代码：
+
+```scala
+def interpret[A](program:ConsoleIO[A]):A = program match {
+  case WriteLine(line, next) => println(line); interpret(next)
+  case ReadLine(process) => interpret(process(readLine()))
+  case Pure(value) => value
+  case Map(v, f) => f(interpret(v))
+}
+```
+
+还有更好的方式，不过这里就不再过多演示了。到目前为止，我认为这已经相当有意思了，我们同时能够描述一个充满副作用的，但是又满足完整性、确定性、纯函数的要求，又能很方便的转换为一个真实执行副作用的程序。
+
+注意，这种转换需要、也非常必要在程序的最后进行(将副作用尽可能推迟到最后)！在 Haskell 中，这会发生在 Haskell 运行时的主函数之外。然而在其他的语言中，背后并没有这些函数式级别的机制支持，你总是可以在程序的入口点以副作用的方式来解释你的程序。
+
+这么做是为了确保你在程序中拥有最大程度的完整性、确定性以及纯洁性。在你边缘的地方，你可能有个小层很难去表示，但正是在这里来基于底层将程序转换为可执行副作用的描述。
+
+### 可扩展性
+
+这种方式在一个固定副作用集的世界里会运行的很多好。在我们目前的用例中，控制台 IO—从一个控制台读写文本行。但是在实际的程序中，多种原因之下的副作用要复杂的多，我们受益于使用不同的副作用组合进所有副作用来构建程序的能力。
+
+第一步是识别附加结构。实质上，我们可以把对控制台程序的描述拆分成生成值(WriteLine)和接收值(ReadLine)。程序剩余的部分则是由纯模板组成：要么是通过映射(map)返回值将一个程序转换为另外一个，要么是，一个程序依赖另外一个程序的结果，将这两个程序进行链接(chain/flatMap)。
+
+如果这没有任何意义，可以研究一下下面的例子：
+
+```scala
+sealed trait ConsoleIO[A]{
+  def map[B](f: A=>B):ConsoleIO[B] = Map(this, f)
+  def flatMap[B](f: A=>ConsoleIP[B]):ConsoleIO[B] = Chain(chis, f)
+}
+
+final case class WriteLine(line:String) extends ConsoleIO[Unit]
+final case class ReadLine() extends ConsoleIO[String]
+final case class Pure[A](value: A) extends ConsoleIO[A]
+final case class Chain[A0,A](v:ConsoleIO[A0], f: A0=>ConsoleIO[A]) extends ConsoleIO[A]
+final case class Map[A0, A](v: ConsoleIO[A0], f: A0 => A) extends ConsoleIO[A]
+```
+
+这里只有一点不同，增加了更多令人迷惑的方式来表示同一个东西。使用这个结构，我们的交互程序会表示的更复杂一点：
+
+```scala
+def userNameProgram:ConsoleIO[String] = 
+  Chain[Unit, String](
+    WriteLine("What is your name?"),
+    _ => Chain[String, String](
+      ReadLine(),
+      name => Chain[Unit, String](
+        WriteLine("Hello, " + name + "!"),
+        _ => Pure(name)
+      )
+    )
+  )
+```
+
+在这个模型中，`ConsoleIO`拥有一组看上去泛型的项，chain、Map、Pure，他们不会跟我们控制台程序的副作用打交道，另外又有两个额外的项用来描述这些副作用：ReadLine、WriteLine，他们在这个模型中则被简化了。
+
+这种模型构建的解释器也会有一点复杂：
+
+```scala
+def interpret[A](program: ConsoleIO[A]):A = program match{
+  case WriteLine(line) => println(line); ();
+  case ReadLine() => readLine()
+  case Pure(value) => value
+  case Map(v, f) => f(interpret(v))
+  case Chain(v, f) => interpret(f(interpret(b)))
+}
+```
+
+这种简明的描述看起来不会完全不同，但关键点在于只有两项用来描述副作用，剩余则都是纯函数装置。这些装置可以被抽象到另一个类然后复用于其他所有的副作用类型。比如：
+
+```scala
+sealed trait Sequential[F[_], A] {
+  def map[B](f: A=> B):Sequential[F, B] = Map[F, A, B](this, f)
+  def flatMap[B](f:A => Sequential[F, B]):Sequential[F, B] = Chain[F, A, B](this, f)
+}
+
+final case class Effect[F[_], A](fa: F[A]) extends Sequential[F, A]
+final case class Pure[F[_]](value:A) extends Sequential[F, A]
+final case class Chain[F[_], A0, A](v: Sequential[F, A0], f: A0=>Sequential[F,A]) extends Sequential[F,A]
+final case class Map[F[_], A0, A](v:Sequential[F, A0], f:A0=>A) extends Sequential[F,A]
+
+sealed trait ConsoleF[A]
+final case class WriteLine(line: String) extends ConsoleF[Unit]
+final case class ReadLine() extends ConsoleF[String]
+
+type ConsoleIO[A] = Sequential[ConsoleF, A]
+```
+
+`Sequential`来并不直接引用`ConsoleIO`，因此可以复用与其他不同的副作用类型。
+
+这允许我们清晰地将副作用从计算拆分开。因此新版本的 hello world 程序看起来会是这样：
+
+```scala
+def userNameProgram:ConsoleIO[String] = {
+  Chain[ConsoleF, Unit, String](
+    Effect[ConsoleF, Unit](WriteLine("What is your name?")),
+    _ => Chain[ConsoleF, String, String](
+      Effect[ConsoleF, String](ReadLine()),
+      name => Chain[ConsoleF, Unit, String](
+        Effect[ConsoleF, Unit](WriteLine("Hello, " + name + "!")),
+        _ => Pure(name)
+      )
+    )
+  )
+}
+```
+
+如果我们利用 Scala 的 for 符号，然后添加一个隐式类来更方便的将副作用包含到`Effect`的构造器中：
+
+```scala
+def userNameProgram:ConsoleIO[String] = {
+  for{
+    _ <- WriteLine("What is your name?").effect
+    name <- ReadLine().effect
+    _ <- WriteLine("Hello, " + name + "!").effect
+  } yield name
+}
+```
+
+这种方式可以进一步简化，比如，为所有项添加帮助函数。这些函数使程序更加简洁：
+
+```scala
+def userNameProgram:ConsoleIO[String] = {
+  for{
+    _ <- writeLine("What is your name?")
+    name <- readLine()
+    _ <- writeLine("Hello "+ name + "!")
+  } yield name
+}
+```
+
+这与上一种实现没有什么不同。结构也大致相同，仅有一点语法不同。在我们的例子中，我们构建了一个程序的*description*，完整、确定的纯函数，他本身对外部世界没有任何副作用(除了利用 CPU 和内存来计算结构)。
+
+此外，使用这种清晰的分离，实际的副作用集也可以进行扩展。这意味着我们可以在两个程序中使用采用不同的副作用，然后组合成一个程序来同时拥有两种副作用。
+
+为了达到这种效果，你仅需要一些”EitherOr“来表达这是一种副作用(控制台 IO)或是另一种副作用(文件 IO)：
+
+```scala
+sealed trait EitherOr[F[_], G[_], A]
+final case class IsLeft[F[_], G[_], A](left:F[A]) extends EitherOr[F, G, A]
+final case class IsRight[F[_], G[_], A](right:G[A]) extends EitherOr[G, G, A]
+
+type CompositeProgram[A] = Sequential[EitherOr[ConsoleIO, FileIO, ?], A]
+```
+
+可以基于这个结构来时间简洁的解释器，并可以根据指定的副作用类型(控制台或文件)复用到其他的解释器中。
+
+现在我们已经从第一个原则开发到这，而且没有任何术语，你看到的这种抽象实际上称为著名的”Free monad“，它让不知情的 Scala 程序员无处不在害怕！
+
+这看起来不是太糟，对吧？
+
+在我们结束整个教程之前，看一下这种抽象的其他好处。
+
+## 纯函数的能力
+
+通常对这种副作用的编码方式的反应是，”有什么意义？“
+
+使用这种风格来描述副作用化程序确实有一些非常实际的好处，
+
+- 你的程序的类型精确描述了它到底能做什么。因为没有无处不在的大块机器代码嵌入，代码推理能做的事就变得非常简单。相反，你以声明的方式准确描述了你的程序是什么(或更进一步，你描述是了如何将一个抽象层的副作用转换为一个较低抽象层的副作用)。
+- 你可以将程序的描述与其实际所做的事分开。例如，一个 Web 应用程序可以创建 HTML，但这样的描述可以解释为 HTML DOM 节点，Canvas 节点，或服务器上的 PDF。
+- 你可以模拟依赖。如果你的外部依赖(文件系统、网络、API 等)都由数据结构描述，那么你可以轻松遍历这些数据结构，以确保你提供了正确的值，他们也返回了正确的响应。与 mock 库不同，这种方式是完全类型安全的，而却不需要任何运行时支持。
+- 你可以在程序运行时执行检查。比如，你可以添加日志行，以打印出每个指令要做什么，以及是否成功。这些日志可以是相当详细的，可以取代手工日志的需要。或者跟多，他们可以在组合解释器时”编织(wave in)“进去，日志在被禁用时可以没有任何开销。没有模板代码也没有开销—对我来说听起来真的不错。
+- 除了日志，你可以在运行时将整个切面添加到程序中。比如添加认证、授权、审计，仅通过组合解释器而无需修改代码库。就像面向切面编程，但更加类型安全且灵活。
+
+除了所有的这些好处之外，你还可以得到非常明显的好处，能够很好的推理，完整、确定、纯函数，即使是存在副作用的情况下。这些好处可以是新的开发者收益，维护已有的代码、解决 bug，引进新的团队成员等等。
+
+## 总结
+
+我洗完至少文章中涵盖的部分创造了一些意义。更重要的是，我希望你们看到我们是如何使用完整的、确定的纯函数编写完整程序，以及这种方式带来的好处，其中一些也是我们刚刚发现的。
+
+如果没有别的，这是一个学习更多函数式编程的呼唤！尽管拥有奇怪的名字、不完整的文档、混乱的类型也要坚持下去。
+
+函数式编程非常有力，拥有巨大的力量。根据我的经验，那些花时间学习函数式编程的人最终会变得对他充满热情，永远不会回到过去的老路上。函数式编程给了开发者强大的力量—以简化的方式编写软件并输出简洁代码的能力，维护成本更低，更易组合、更易推理，等等等等。
+
+如果你有兴趣，我期待你坚持下去，如果你卡主了，你要知道我还有社区的其他很多成员都站在你背后。我们会帮助你达到下一个层次，从值到值，从类型到类型，从 lambda 到 lambda。
+
+在另一边等你，伙计！
+

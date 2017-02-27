@@ -7,6 +7,7 @@
 
 - 语言基础
 - 函数式编程
+  - [Great Article：函数式编程新手入门](functional/a-beginner-friendly-tour-through-functional-programming-in-scala.md)
   - [Monoid](functional/monoid.md)
   - [函数式编程与类型类](functional/functional-programming-and-type-classes.md)
 - 并发
